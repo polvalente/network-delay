@@ -8,6 +8,8 @@ defmodule NetworkDelay.Node do
 
   use GenServer
 
+  require Logger
+
   def start_link(args \\ [name: __MODULE__]),
     do: GenServer.start_link(__MODULE__, args, name: args[:name])
 
@@ -17,20 +19,34 @@ defmodule NetworkDelay.Node do
 
     neighbors = Keyword.get(args, :neighbors, [])
 
-    {:ok, %{name: name, neighbors: neighbors}}
+    {:ok, %{name: name, neighbors: neighbors, received_messages: [], audited: []}}
   end
 
-  def handle_info({:trace, dest}, %{name: name, neighbors: neighbors} = state) do
-    Enum.each(neighbors, fn neighbor ->
-      send(neighbor, {:ping, nil, dest, [name]})
+  def handle_call(:reset, _caller, %{name: name, neighbors: neighbors}),
+    do: {:reply, :ok, %{name: name, neighbors: neighbors, received_messages: [], audited: []}}
+
+  def handle_info({:trace, dest} = msg, %{name: name, neighbors: neighbors} = state) do
+    state = audit_msg(state, msg)
+
+    Enum.each(neighbors, fn {neighbor, delay_ms} ->
+      Process.send_after(neighbor, {:ping, name, dest, [name]}, delay_ms)
     end)
 
     msgs = Map.get(state, :received_messages, [])
-    new_state = Map.put(state, :received_messages, [{:trace, [name]} | msgs])
+
+    new_state =
+      Map.put(state, :received_messages, [
+        %{msg: {:trace, [name]}, at: NaiveDateTime.utc_now()} | msgs
+      ])
+
     {:noreply, new_state}
   end
 
-  def handle_info({:ping, source, dest, route}, %{name: dest} = state) do
+  def handle_info({:ping, source, dest, route} = msg, %{name: dest} = state) do
+    # case for when current not is destination
+    Logger.info("Trace reached destination")
+    state = audit_msg(state, msg)
+
     msgs = Map.get(state, :received_messages, [])
 
     new_state =
@@ -39,21 +55,42 @@ defmodule NetworkDelay.Node do
           state
 
         _ ->
-          Map.put(state, :received_messages, [{:ping, source, dest, [dest | route]} | msgs])
+          Map.put(state, :received_messages, [
+            %{msg: {:ping, source, dest, [dest | route]}, at: NaiveDateTime.utc_now()} | msgs
+          ])
       end
 
     {:noreply, new_state}
   end
 
-  def handle_info({:ping, source, dest, route}, %{name: name, neighbors: neighbors} = state) do
-    Enum.each(neighbors, fn neighbor ->
+  def handle_info({:ping, source, dest, route} = msg, %{name: name, neighbors: neighbors} = state) do
+    state = audit_msg(state, msg)
+
+    Enum.each(neighbors, fn {neighbor, delay_ms} ->
       unless neighbor == source or neighbor in route do
-        send(neighbor, {:ping, name, dest, [name | route]})
+        Process.send_after(neighbor, {:ping, name, dest, [name | route]}, delay_ms)
+      else
+        Logger.error("""
+        Ignored message:
+          #{inspect({neighbor, delay_ms})}
+        process:
+          #{inspect(name)}
+        """)
       end
     end)
 
     msgs = Map.get(state, :received_messages, [])
-    new_state = Map.put(state, :received_messages, [{:ping, source, dest, [name | route]} | msgs])
+
+    new_state =
+      Map.put(state, :received_messages, [
+        %{msg: {:ping, source, dest, [name | route]}, at: NaiveDateTime.utc_now()} | msgs
+      ])
+
     {:noreply, new_state}
+  end
+
+  defp audit_msg(state, msg) do
+    audited = Map.get(state, :audited, [])
+    Map.put(state, :audited, [msg | audited])
   end
 end
