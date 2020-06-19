@@ -55,7 +55,10 @@ defmodule NetworkDelay do
     node_specs =
       @edges
       |> Enum.map(fn {source, dest, delay} ->
-        ~s[#{Macro.to_string(source)} --> #{Macro.to_string(dest)}: #{delay}]
+        """
+        #{Macro.to_string(source)} --> #{Macro.to_string(dest)}: #{delay}
+        #{Macro.to_string(dest)} --> #{Macro.to_string(source)}: #{delay}
+        """
       end)
       |> Enum.join("\n")
 
